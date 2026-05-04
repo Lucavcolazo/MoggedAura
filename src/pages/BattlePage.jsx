@@ -1,12 +1,18 @@
+/* eslint-disable react-hooks/set-state-in-effect, react-hooks/immutability, react-hooks/purity */
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useCamera } from '../hooks/useCamera';
 import { useFaceLandmarker } from '../hooks/useFaceLandmarker';
 import { usePSLScore } from '../hooks/usePSLScore';
+import { usePeerConnection } from '../hooks/usePeerConnection';
+import { useMatchmakingQueue } from '../hooks/useMatchmakingQueue';
+import { usePublicMatch } from '../hooks/usePublicMatch';
+import { useAuthSession } from '../hooks/useAuthSession';
 import { drawLandmarks } from '../utils/landmarks';
 import { getTier } from '../utils/tiers';
-import { generateBotScore } from '../utils/scoring';
-import { calculateAura, loadAura, saveAura, saveMatch, generateBotAura, getResultMessage } from '../utils/aura';
+import { calculateAura, loadAura, saveAura, saveMatch, getResultMessage } from '../utils/aura';
+import { isLivenessVerified } from '../utils/liveness';
+import { updateProfileAfterMatch } from '../lib/profile';
 import '../styles/battle.css';
 
 const SCAN_DURATION = 10;
@@ -21,11 +27,34 @@ const BATTLE_PHASES = {
   RESULTS: 'results',
 };
 
-const BOT_NAMES = [
-  'AlphaJaw99', 'MogKing_X', 'ChadMode44', 'xX_Hunter_Xx', 'SynergyMog',
-  'IronJaw_23', 'CantilTilt', 'GigaVibes', 'PSL_Lord', 'SkullMog88',
-  'FaceMaxxer', 'JawlineGod', 'HunterEyes7', 'MogLord_01', 'TitanFace',
-];
+function getCoverTransform(video, container) {
+  const vw = video.videoWidth || 640;
+  const vh = video.videoHeight || 480;
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  if (!cw || !ch) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 };
+
+  const videoRatio = vw / vh;
+  const containerRatio = cw / ch;
+  let drawW;
+  let drawH;
+  let offsetX;
+  let offsetY;
+
+  if (containerRatio > videoRatio) {
+    drawW = vw;
+    drawH = vw / containerRatio;
+    offsetX = 0;
+    offsetY = (vh - drawH) / 2;
+  } else {
+    drawH = vh;
+    drawW = vh * containerRatio;
+    offsetX = (vw - drawW) / 2;
+    offsetY = 0;
+  }
+
+  return { scaleX: cw / drawW, scaleY: ch / drawH, offsetX, offsetY };
+}
 
 function FireExplosion() {
   const embers = Array.from({ length: 20 }, (_, i) => ({
@@ -41,7 +70,7 @@ function FireExplosion() {
       <div className="fire-explosion__glow" />
       <div className="fire-explosion__ring" />
       <div className="fire-explosion__embers">
-        {embers.map(e => (
+        {embers.map((e) => (
           <div
             key={e.id}
             className="fire-ember"
@@ -60,102 +89,150 @@ function FireExplosion() {
 
 export default function BattlePage() {
   const navigate = useNavigate();
-  const { videoRef, isActive, startCamera, stopCamera } = useCamera();
+  const { user } = useAuthSession();
+  const username = localStorage.getItem('mogged_username') || 'You';
+  const { videoRef, isActive, startCamera, stopCamera, getStream } = useCamera();
   const { initialize, detect, isReady } = useFaceLandmarker();
   const { score: playerScore, processFrame, startScanning, reset: resetScore } = usePSLScore();
+  const { createRoom, joinRoom, callPeer, sendData, disconnect, isConnected, roomCode, peerData, remoteStream } = usePeerConnection();
 
-  const canvasRef = useRef(null);
-  const animFrameRef = useRef(null);
-
+  const [playerAura, setPlayerAura] = useState(1200);
   const [phase, setPhase] = useState(BATTLE_PHASES.SEARCHING);
   const [countdown, setCountdown] = useState(3);
   const [timer, setTimer] = useState(SCAN_DURATION);
   const [overtimeTimer, setOvertimeTimer] = useState(OVERTIME_DURATION);
-  const [botScore, setBotScore] = useState(null);
-  const [botName, setBotName] = useState('');
-  const [botAura, setBotAura] = useState(1200);
-  const [playerAura, setPlayerAura] = useState(1200);
+  const [currentMatch, setCurrentMatch] = useState(null);
+  const [opponentName, setOpponentName] = useState('Opponent');
+  const [opponentAura, setOpponentAura] = useState(1200);
+  const [opponentScore, setOpponentScore] = useState(null);
+  const [myReady, setMyReady] = useState(false);
+  const [opponentReady, setOpponentReady] = useState(false);
+  const [peerRoomCode, setPeerRoomCode] = useState('');
   const [result, setResult] = useState(null);
   const [auraChange, setAuraChange] = useState(0);
-  const [animatedBotScore, setAnimatedBotScore] = useState(0);
   const [resultMsg, setResultMsg] = useState(null);
 
-  // Initialize on mount
+  const canvasRef = useRef(null);
+  const videoWrapRef = useRef(null);
+  const remoteVideoRef = useRef(null);
+  const animFrameRef = useRef(null);
+  const readySentRef = useRef(false);
+  const peerInitRef = useRef(false);
+
+  const { userId, status: queueStatus, match, error: queueError, startQueue, leaveQueue } = useMatchmakingQueue({
+    username,
+    aura: playerAura,
+  });
+
+  useEffect(() => {
+    if (!isLivenessVerified()) {
+      navigate('/check', { replace: true });
+    }
+  }, [navigate]);
+
+  const onMatchEvent = useCallback((event) => {
+    if (event.type === 'ready') {
+      setOpponentReady(true);
+    } else if (event.type === 'score' || event.type === 'final-score') {
+      if (typeof event.score === 'number') {
+        setOpponentScore(event.score);
+      }
+    } else if (event.type === 'peer-room' && event.roomCode) {
+      setPeerRoomCode(event.roomCode);
+    } else if (event.type === 'left') {
+      setPhase(BATTLE_PHASES.SEARCHING);
+      setCurrentMatch(null);
+      setOpponentReady(false);
+      setMyReady(false);
+      readySentRef.current = false;
+      peerInitRef.current = false;
+      setPeerRoomCode('');
+      disconnect();
+      startQueue();
+    }
+  }, [disconnect, startQueue]);
+
+  const { sendEvent } = usePublicMatch({
+    matchId: currentMatch?.matchId,
+    selfId: userId,
+    onEvent: onMatchEvent,
+  });
+
   useEffect(() => {
     const init = async () => {
+      const aura = loadAura();
+      setPlayerAura(aura);
       await Promise.all([startCamera(), initialize()]);
+      await startQueue();
     };
     init();
-    const pAura = loadAura();
-    setPlayerAura(pAura);
-    setBotAura(generateBotAura(pAura));
-    setBotName(BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)]);
 
     return () => {
+      sendEvent('left');
+      leaveQueue();
+      disconnect();
       stopCamera();
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
-  }, []);
+  }, [disconnect, initialize, leaveQueue, sendEvent, startCamera, startQueue, stopCamera]);
 
-  // Phase transitions
   useEffect(() => {
-    let t;
-    if (phase === BATTLE_PHASES.SEARCHING) {
-      t = setTimeout(() => setPhase(BATTLE_PHASES.FOUND), 2500);
-    } else if (phase === BATTLE_PHASES.FOUND) {
-      t = setTimeout(() => { setPhase(BATTLE_PHASES.COUNTDOWN); setCountdown(3); }, 1500);
-    } else if (phase === BATTLE_PHASES.COUNTDOWN) {
-      if (countdown > 0) {
-        t = setTimeout(() => setCountdown(c => c - 1), 1000);
-      } else {
-        setPhase(BATTLE_PHASES.SCANNING);
-        setTimer(SCAN_DURATION);
-        startScanning();
-        setBotScore(generateBotScore());
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+      remoteVideoRef.current.play().catch(() => {});
+    }
+  }, [remoteStream]);
+
+  useEffect(() => {
+    if (!match || currentMatch) return;
+    setCurrentMatch(match);
+    const opponent = match.playerA.userId === userId ? match.playerB : match.playerA;
+    setOpponentName(opponent.username || 'Opponent');
+    setOpponentAura(Number(opponent.aura) || 1200);
+    setPhase(BATTLE_PHASES.FOUND);
+  }, [currentMatch, match, userId]);
+
+  useEffect(() => {
+    if (!currentMatch || !isActive || !isReady || readySentRef.current) return;
+    readySentRef.current = true;
+    setMyReady(true);
+    sendEvent('ready');
+  }, [currentMatch, isActive, isReady, sendEvent]);
+
+  useEffect(() => {
+    if (!currentMatch || peerInitRef.current) return;
+
+    const initPeer = async () => {
+      if (currentMatch.hostId === userId) {
+        const generatedCode = `MOG-${currentMatch.matchId.slice(-6).toUpperCase()}`;
+        await createRoom(generatedCode);
+        setPeerRoomCode(generatedCode);
+        sendEvent('peer-room', { roomCode: generatedCode });
       }
-    }
-    return () => clearTimeout(t);
-  }, [phase, countdown, startScanning]);
+    };
 
-  // Scanning timer
+    initPeer();
+    peerInitRef.current = true;
+  }, [createRoom, currentMatch, sendEvent, userId]);
+
   useEffect(() => {
-    if (phase !== BATTLE_PHASES.SCANNING) return;
-    if (timer > 0) {
-      const t = setTimeout(() => setTimer(s => s - 1), 1000);
-      return () => clearTimeout(t);
-    } else {
-      setPhase(BATTLE_PHASES.OVERTIME);
-      setOvertimeTimer(OVERTIME_DURATION);
-    }
-  }, [phase, timer]);
+    if (!currentMatch || currentMatch.hostId === userId || !peerRoomCode || isConnected) return;
+    joinRoom(peerRoomCode);
+  }, [currentMatch, isConnected, joinRoom, peerRoomCode, userId]);
 
-  // Overtime timer
   useEffect(() => {
-    if (phase !== BATTLE_PHASES.OVERTIME) return;
-    if (overtimeTimer > 0) {
-      const t = setTimeout(() => setOvertimeTimer(s => s - 1), 1000);
-      return () => clearTimeout(t);
-    } else {
-      setPhase(BATTLE_PHASES.RESULTS);
-    }
-  }, [phase, overtimeTimer]);
+    if (!isConnected || !isActive) return;
+    const stream = getStream();
+    if (!stream) return;
+    callPeer(stream);
+    sendData({ type: 'username', name: username });
+  }, [callPeer, getStream, isActive, isConnected, sendData, username]);
 
-  // Animated bot score during scanning
   useEffect(() => {
-    if ((phase !== BATTLE_PHASES.SCANNING && phase !== BATTLE_PHASES.OVERTIME) || !botScore) return;
-    let frame = 0;
-    const targetScore = botScore.overall;
-    const interval = setInterval(() => {
-      frame++;
-      const progress = Math.min(1, frame / 50);
-      const wobble = (1 - progress) * (Math.random() * 2 - 1);
-      const current = targetScore * progress + (5 + wobble * 3) * (1 - progress);
-      setAnimatedBotScore(parseFloat(Math.max(1, Math.min(10, current)).toFixed(1)));
-    }, 200);
-    return () => clearInterval(interval);
-  }, [phase, botScore]);
+    if (!peerData || peerData.type !== 'username') return;
+    setOpponentName(peerData.name || 'Opponent');
+  }, [peerData]);
 
-  // Detection loop
   const runDetection = useCallback(() => {
     if (!videoRef.current || !isReady || !isActive) {
       animFrameRef.current = requestAnimationFrame(runDetection);
@@ -163,86 +240,178 @@ export default function BattlePage() {
     }
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!canvas) { animFrameRef.current = requestAnimationFrame(runDetection); return; }
+    const wrap = videoWrapRef.current;
+    if (!canvas || !wrap) {
+      animFrameRef.current = requestAnimationFrame(runDetection);
+      return;
+    }
     const ctx = canvas.getContext('2d');
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    const r = detect(video);
-    if (r) {
-      drawLandmarks(ctx, r.landmarks, canvas.width, canvas.height, {
+    const cw = wrap.clientWidth;
+    const ch = wrap.clientHeight;
+    canvas.width = cw;
+    canvas.height = ch;
+
+    const detection = detect(video);
+    if (detection) {
+      const t = getCoverTransform(video, wrap);
+      const vw = video.videoWidth || 640;
+      const vh = video.videoHeight || 480;
+      const transformed = detection.landmarks.map((lm) => ({
+        ...lm,
+        x: (lm.x * vw - t.offsetX) * t.scaleX / cw,
+        y: (lm.y * vh - t.offsetY) * t.scaleY / ch,
+      }));
+      drawLandmarks(ctx, transformed, cw, ch, {
         color: '#00ff88', pointSize: 1.5, lineWidth: 0.5, glowEffect: true,
       });
       if (phase === BATTLE_PHASES.SCANNING || phase === BATTLE_PHASES.OVERTIME) {
-        processFrame(r.landmarks);
+        processFrame(detection.landmarks);
       }
+    } else {
+      ctx.clearRect(0, 0, cw, ch);
     }
     animFrameRef.current = requestAnimationFrame(runDetection);
-  }, [isReady, isActive, detect, videoRef, phase, processFrame]);
+  }, [detect, isActive, isReady, phase, processFrame, videoRef]);
 
   useEffect(() => {
     if (isActive && isReady) {
       animFrameRef.current = requestAnimationFrame(runDetection);
     }
-    return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
+    return () => {
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
   }, [isActive, isReady, runDetection]);
 
-  // Calculate results
   useEffect(() => {
-    if (phase !== BATTLE_PHASES.RESULTS || !botScore) return;
-    const pScore = playerScore?.overall || 5.0;
-    const isWin = pScore >= botScore.overall;
+    let t;
+    if (phase === BATTLE_PHASES.FOUND && myReady && opponentReady) {
+      t = setTimeout(() => {
+        setPhase(BATTLE_PHASES.COUNTDOWN);
+        setCountdown(3);
+      }, 1200);
+    } else if (phase === BATTLE_PHASES.COUNTDOWN) {
+      if (countdown > 0) {
+        t = setTimeout(() => setCountdown((prev) => prev - 1), 1000);
+      } else {
+        setPhase(BATTLE_PHASES.SCANNING);
+        setTimer(SCAN_DURATION);
+        startScanning();
+      }
+    }
+    return () => clearTimeout(t);
+  }, [countdown, myReady, opponentReady, phase, startScanning]);
+
+  useEffect(() => {
+    if (phase !== BATTLE_PHASES.SCANNING) return undefined;
+    if (timer > 0) {
+      const t = setTimeout(() => setTimer((prev) => prev - 1), 1000);
+      return () => clearTimeout(t);
+    }
+    setPhase(BATTLE_PHASES.OVERTIME);
+    setOvertimeTimer(OVERTIME_DURATION);
+    return undefined;
+  }, [phase, timer]);
+
+  useEffect(() => {
+    if (phase !== BATTLE_PHASES.OVERTIME) return undefined;
+    if (overtimeTimer > 0) {
+      const t = setTimeout(() => setOvertimeTimer((prev) => prev - 1), 1000);
+      return () => clearTimeout(t);
+    }
+    sendEvent('final-score', { score: playerScore?.overall || 5.0 });
+    const done = setTimeout(() => setPhase(BATTLE_PHASES.RESULTS), 2000);
+    return () => clearTimeout(done);
+  }, [overtimeTimer, phase, playerScore, sendEvent]);
+
+  useEffect(() => {
+    if (phase !== BATTLE_PHASES.SCANNING && phase !== BATTLE_PHASES.OVERTIME) return;
+    const i = setInterval(() => {
+      if (playerScore?.overall) {
+        sendEvent('score', { score: playerScore.overall });
+      }
+    }, 1000);
+    return () => clearInterval(i);
+  }, [phase, playerScore, sendEvent]);
+
+  useEffect(() => {
+    if (phase !== BATTLE_PHASES.RESULTS) return;
+    const pScore = playerScore?.overall || 5;
+    const oScore = opponentScore ?? 5;
+    const isWin = pScore >= oScore;
     setResult(isWin ? 'win' : 'loss');
 
-    const winnerScore = Math.max(pScore, botScore.overall);
-    const loserScore = Math.min(pScore, botScore.overall);
+    const winnerScore = Math.max(pScore, oScore);
+    const loserScore = Math.min(pScore, oScore);
     setResultMsg(getResultMessage(winnerScore, loserScore));
 
-    const { newAura, change } = calculateAura(playerAura, botAura, isWin ? 1 : 0);
+    const { newAura, change } = calculateAura(playerAura, opponentAura, isWin ? 1 : 0);
     setAuraChange(change);
     saveAura(newAura);
     localStorage.setItem('mogged_last_score', String(pScore));
     saveMatch({
       result: isWin ? 'win' : 'loss',
       playerScore: pScore,
-      opponentScore: botScore.overall,
-      opponentName: botName,
+      opponentScore: oScore,
+      opponentName,
       eloChange: change,
       newElo: newAura,
       timestamp: Date.now(),
+      mode: 'public-real',
     });
-  }, [phase, botScore, playerScore, playerAura, botAura, botName]);
 
-  const handleRematch = () => {
+    updateProfileAfterMatch({
+      userId: user?.id,
+      newAura,
+      result: isWin ? 'win' : 'loss',
+      playerScore: pScore,
+    }).catch(() => {});
+  }, [opponentAura, opponentName, opponentScore, phase, playerAura, playerScore, user?.id]);
+
+  const handleRematch = async () => {
+    sendEvent('left');
+    await leaveQueue();
+    disconnect();
     resetScore();
-    setBotScore(null);
+    setOpponentScore(null);
+    setOpponentReady(false);
+    setMyReady(false);
+    setCurrentMatch(null);
+    setPeerRoomCode('');
     setResult(null);
-    setAuraChange(0);
     setResultMsg(null);
+    setAuraChange(0);
+    readySentRef.current = false;
+    peerInitRef.current = false;
+    setPhase(BATTLE_PHASES.SEARCHING);
     setCountdown(3);
     setTimer(SCAN_DURATION);
     setOvertimeTimer(OVERTIME_DURATION);
-    setAnimatedBotScore(0);
-    const pAura = loadAura();
-    setPlayerAura(pAura);
-    setBotAura(generateBotAura(pAura));
-    setBotName(BOT_NAMES[Math.floor(Math.random() * BOT_NAMES.length)]);
-    setPhase(BATTLE_PHASES.SEARCHING);
+    startQueue();
   };
 
   const pScore = playerScore?.overall || 0;
   const pTier = playerScore ? getTier(pScore) : null;
-  const bTier = botScore ? getTier(botScore.overall) : null;
-  const username = localStorage.getItem('mogged_username') || 'You';
+  const oTier = typeof opponentScore === 'number' ? getTier(opponentScore) : null;
 
   return (
     <div className="battle-page">
-      <Link to="/dashboard" className="battle-back">← Leave</Link>
+      <Link
+        to="/dashboard"
+        className="battle-back"
+        onClick={() => {
+          sendEvent('left');
+          leaveQueue();
+          disconnect();
+          stopCamera();
+        }}
+      >
+        ← Leave
+      </Link>
 
-      {/* Timer */}
       {(phase === BATTLE_PHASES.SCANNING || phase === BATTLE_PHASES.OVERTIME) && (
         <div className="battle-timer">
           <span className={`battle-timer__time ${phase === BATTLE_PHASES.OVERTIME ? 'battle-timer__time--overtime' : ''}`}>
-            {phase === BATTLE_PHASES.OVERTIME ? `+${overtimeTimer}` : timer}s
+            {phase === BATTLE_PHASES.OVERTIME ? `+${overtimeTimer}` : `${timer}s`}
           </span>
           <span className={`battle-timer__label ${phase === BATTLE_PHASES.OVERTIME ? 'battle-timer__label--overtime' : ''}`}>
             {phase === BATTLE_PHASES.OVERTIME ? '🔥 OVERTIME' : 'SCANNING'}
@@ -253,7 +422,7 @@ export default function BattlePage() {
               style={{
                 width: phase === BATTLE_PHASES.OVERTIME
                   ? `${(overtimeTimer / OVERTIME_DURATION) * 100}%`
-                  : `${(timer / SCAN_DURATION) * 100}%`
+                  : `${(timer / SCAN_DURATION) * 100}%`,
               }}
             />
           </div>
@@ -261,10 +430,9 @@ export default function BattlePage() {
       )}
 
       <div className="battle-content">
-        {/* YOUR PANEL */}
         <div className={`player-panel ${result === 'win' ? 'player-panel--winner' : result === 'loss' ? 'player-panel--loser' : ''}`}>
           {result === 'win' && <FireExplosion />}
-          <div className="player-panel__video-wrap">
+          <div className="player-panel__video-wrap" ref={videoWrapRef}>
             <div className="player-panel__label" style={{ color: '#00ff88' }}>YOUR SCAN</div>
             <video ref={videoRef} playsInline muted />
             <canvas ref={canvasRef} />
@@ -276,102 +444,59 @@ export default function BattlePage() {
             <div className="player-info__left">
               <div className="player-info__score" style={{ color: pTier?.color || '#fff' }}>
                 {(phase === BATTLE_PHASES.SCANNING || phase === BATTLE_PHASES.OVERTIME || phase === BATTLE_PHASES.RESULTS)
-                  ? pScore.toFixed(1) : '—'}
+                  ? pScore.toFixed(1)
+                  : '—'}
               </div>
               <div className="player-info__details">
                 <span className="player-info__name">{username}</span>
                 <span className="player-info__elo">✨ {playerAura} AP</span>
               </div>
             </div>
-            <div className="player-info__right">
-              {pTier && (
-                <span className="tier-badge" style={{ background: pTier.color + '22', color: pTier.color, border: `1px solid ${pTier.color}44` }}>
-                  {pTier.emoji} {pTier.name}
-                </span>
-              )}
-              {playerScore?.dominant && (
-                <span className="player-info__dom">
-                  <span className="player-info__tag">DOM </span>
-                  <span className="player-info__dom-label">{playerScore.dominant.label}</span>
-                </span>
-              )}
-              {playerScore?.flaw && (
-                <span className="player-info__dom">
-                  <span className="player-info__tag">FLAW </span>
-                  <span className="player-info__flaw-label">{playerScore.flaw.label}</span>
-                </span>
-              )}
-            </div>
           </div>
         </div>
 
-        {/* VS BADGE */}
         <div className="vs-badge">
           <div className="vs-badge__line" />
           <div className="vs-badge__text">⚡ VS ⚡</div>
           <div className="vs-badge__line" />
         </div>
 
-        {/* ENEMY PANEL */}
         <div className={`player-panel ${result === 'loss' ? 'player-panel--winner' : result === 'win' ? 'player-panel--loser' : ''}`}>
           {result === 'loss' && <FireExplosion />}
           <div className="player-panel__video-wrap">
             <div className="player-panel__label" style={{ color: '#ff4444' }}>ENEMY SCAN</div>
-            <div className="bot-avatar">
-              <div className="bot-avatar__icon">🎭</div>
-              <div className="bot-avatar__text">
-                {(phase === BATTLE_PHASES.SCANNING || phase === BATTLE_PHASES.OVERTIME) ? 'Scanning...' : botName || 'Opponent'}
+            {remoteStream ? (
+              <video ref={remoteVideoRef} playsInline muted />
+            ) : (
+              <div className="bot-avatar-enhanced">
+                <div className="bot-avatar-enhanced__bg" />
+                <div className="bot-avatar-enhanced__icon">👤</div>
+                <div className="bot-avatar-enhanced__name">{opponentName}</div>
               </div>
-            </div>
-            {(phase === BATTLE_PHASES.SCANNING || phase === BATTLE_PHASES.OVERTIME) && (
-              <div className="scanning-overlay"><div className="scanning-overlay__line" style={{ animationDelay: '1s' }} /></div>
             )}
-            <button className="report-btn">⚠ REPORT</button>
           </div>
           <div className="player-panel__info">
             <div className="player-info__left">
-              <div className="player-info__score" style={{ color: bTier?.color || '#666' }}>
-                {(phase === BATTLE_PHASES.SCANNING || phase === BATTLE_PHASES.OVERTIME)
-                  ? animatedBotScore.toFixed(1)
-                  : phase === BATTLE_PHASES.RESULTS && botScore
-                    ? botScore.overall.toFixed(1)
-                    : '—'}
+              <div className="player-info__score" style={{ color: oTier?.color || '#666' }}>
+                {typeof opponentScore === 'number' ? opponentScore.toFixed(1) : '—'}
               </div>
               <div className="player-info__details">
-                <span className="player-info__name">{botName || '???'}</span>
-                <span className="player-info__elo">✨ {botAura} AP</span>
+                <span className="player-info__name">{opponentName}</span>
+                <span className="player-info__elo">✨ {opponentAura} AP</span>
               </div>
-            </div>
-            <div className="player-info__right">
-              {bTier && phase !== BATTLE_PHASES.SEARCHING && (
-                <span className="tier-badge" style={{ background: bTier.color + '22', color: bTier.color, border: `1px solid ${bTier.color}44` }}>
-                  {bTier.emoji} {bTier.name}
-                </span>
-              )}
-              {botScore?.dominant && phase === BATTLE_PHASES.RESULTS && (
-                <span className="player-info__dom">
-                  <span className="player-info__tag">DOM </span>
-                  <span className="player-info__dom-label">{botScore.dominant.label}</span>
-                </span>
-              )}
-              {botScore?.flaw && phase === BATTLE_PHASES.RESULTS && (
-                <span className="player-info__dom">
-                  <span className="player-info__tag">FLAW </span>
-                  <span className="player-info__flaw-label">{botScore.flaw.label}</span>
-                </span>
-              )}
             </div>
           </div>
         </div>
       </div>
 
-      {/* Battle State Overlays */}
       {phase === BATTLE_PHASES.SEARCHING && (
         <div className="battle-state">
           <div className="battle-state__searching">
             <div className="battle-state__spinner" />
-            <div className="battle-state__text">Searching for opponent...</div>
-            <div className="battle-state__subtext">Matching by Aura range</div>
+            <div className="battle-state__text">Searching for real opponent...</div>
+            <div className="battle-state__subtext">
+              {queueError ? queueError : queueStatus === 'searching' ? 'Waiting in public queue' : 'Initializing queue...'}
+            </div>
           </div>
         </div>
       )}
@@ -379,7 +504,9 @@ export default function BattlePage() {
       {phase === BATTLE_PHASES.FOUND && (
         <div className="battle-state">
           <div className="battle-state__found">OPPONENT FOUND</div>
-          <div className="battle-state__subtext">{botName} · ✨ {botAura} AP</div>
+          <div className="battle-state__subtext">
+            {opponentName} · ✨ {opponentAura} AP · {roomCode || peerRoomCode || 'Linking P2P...'}
+          </div>
         </div>
       )}
 
@@ -389,7 +516,6 @@ export default function BattlePage() {
         </div>
       )}
 
-      {/* Results */}
       {phase === BATTLE_PHASES.RESULTS && result && (
         <div className="battle-results">
           {resultMsg && (
@@ -400,11 +526,9 @@ export default function BattlePage() {
               </div>
             </>
           )}
-
           <div className={`battle-results__title ${result === 'win' ? 'battle-results__title--win' : 'battle-results__title--loss'}`}>
             {result === 'win' ? '🏆 YOU WIN' : '💀 YOU LOSE'}
           </div>
-
           <div className="battle-results__scores">
             <div className="battle-results__player">
               <div className="battle-results__player-score" style={{ color: pTier?.color }}>{pScore.toFixed(1)}</div>
@@ -412,15 +536,13 @@ export default function BattlePage() {
             </div>
             <div className="battle-results__vs">VS</div>
             <div className="battle-results__player">
-              <div className="battle-results__player-score" style={{ color: bTier?.color }}>{botScore?.overall.toFixed(1)}</div>
-              <div className="battle-results__player-name">{botName}</div>
+              <div className="battle-results__player-score" style={{ color: oTier?.color }}>{(opponentScore || 0).toFixed(1)}</div>
+              <div className="battle-results__player-name">{opponentName}</div>
             </div>
           </div>
-
           <div className={`battle-results__elo-change ${auraChange >= 0 ? 'battle-results__elo-change--positive' : 'battle-results__elo-change--negative'}`}>
             ✨ Aura Points: {auraChange >= 0 ? '+' : ''}{auraChange}
           </div>
-
           <div className="battle-results__buttons">
             <button className="btn-cta" onClick={handleRematch} id="rematch-btn">⚔️ REMATCH</button>
             <Link to="/dashboard" className="btn-secondary" id="back-dashboard">← Dashboard</Link>

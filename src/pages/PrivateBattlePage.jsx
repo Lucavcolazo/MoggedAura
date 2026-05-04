@@ -7,10 +7,12 @@ import { usePeerConnection } from '../hooks/usePeerConnection';
 import { drawLandmarks } from '../utils/landmarks';
 import { getTier } from '../utils/tiers';
 import { calculateAura, loadAura, saveAura, saveMatch, getResultMessage } from '../utils/aura';
+import { isLivenessVerified } from '../utils/liveness';
 import '../styles/battle.css';
 
 const SCAN_DURATION = 10; // seconds
 const OVERTIME_DURATION = 5; // seconds
+const READY_COUNTDOWN = 5; // seconds before battle starts after both ready
 
 function FireExplosion() {
   const embers = Array.from({ length: 20 }, (_, i) => ({
@@ -43,22 +45,67 @@ function FireExplosion() {
   );
 }
 
+/**
+ * Helper: compute object-fit:cover transform for canvas alignment
+ * Returns { sx, sy, sw, sh } describing which part of the video is visible
+ */
+function getCoverTransform(video, container) {
+  const vw = video.videoWidth || 640;
+  const vh = video.videoHeight || 480;
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  if (!cw || !ch) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0, drawW: vw, drawH: vh };
+
+  const videoRatio = vw / vh;
+  const containerRatio = cw / ch;
+
+  let drawW, drawH, offsetX, offsetY;
+
+  if (containerRatio > videoRatio) {
+    // Container is wider than video — video is cropped top/bottom
+    drawW = vw;
+    drawH = vw / containerRatio;
+    offsetX = 0;
+    offsetY = (vh - drawH) / 2;
+  } else {
+    // Container is taller than video — video is cropped left/right
+    drawH = vh;
+    drawW = vh * containerRatio;
+    offsetX = (vw - drawW) / 2;
+    offsetY = 0;
+  }
+
+  return {
+    scaleX: cw / drawW,
+    scaleY: ch / drawH,
+    offsetX,
+    offsetY,
+    drawW,
+    drawH,
+    containerW: cw,
+    containerH: ch,
+  };
+}
+
 export default function PrivateBattlePage() {
   const navigate = useNavigate();
-  const { videoRef, isActive, startCamera, stopCamera } = useCamera();
+  const { videoRef, isActive, startCamera, stopCamera, getStream } = useCamera();
   const { initialize, detect, isReady } = useFaceLandmarker();
   const { score: playerScore, processFrame, startScanning, reset: resetScore } = usePSLScore();
   const {
-    createRoom, joinRoom, sendData, disconnect,
-    isHost, isConnected, isConnecting, roomCode, peerData, error: peerError
+    createRoom, joinRoom, callPeer, sendData, disconnect,
+    isHost, isConnected, isConnecting, roomCode, peerData, remoteStream, error: peerError
   } = usePeerConnection();
 
   const canvasRef = useRef(null);
+  const videoWrapRef = useRef(null);
+  const remoteVideoRef = useRef(null);
   const animFrameRef = useRef(null);
 
-  const [phase, setPhase] = useState('lobby'); // lobby | countdown | scanning | overtime | results
+  // lobby | camera-setup | countdown | scanning | overtime | results
+  const [phase, setPhase] = useState('lobby');
   const [joinCode, setJoinCode] = useState('');
-  const [countdown, setCountdown] = useState(3);
+  const [countdown, setCountdown] = useState(READY_COUNTDOWN);
   const [timer, setTimer] = useState(SCAN_DURATION);
   const [overtimeTimer, setOvertimeTimer] = useState(OVERTIME_DURATION);
   const [playerAura, setPlayerAura] = useState(1200);
@@ -67,8 +114,17 @@ export default function PrivateBattlePage() {
   const [result, setResult] = useState(null);
   const [auraChange, setAuraChange] = useState(0);
   const [resultMsg, setResultMsg] = useState(null);
+  const [myReady, setMyReady] = useState(false);
+  const [opponentReady, setOpponentReady] = useState(false);
+  const [faceDetected, setFaceDetected] = useState(false);
 
   const username = localStorage.getItem('mogged_username') || 'Player';
+
+  useEffect(() => {
+    if (!isLivenessVerified()) {
+      navigate('/check', { replace: true });
+    }
+  }, [navigate]);
 
   // Load aura on mount
   useEffect(() => {
@@ -79,6 +135,14 @@ export default function PrivateBattlePage() {
       if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
     };
   }, []);
+
+  // Attach remote stream to video element
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+      remoteVideoRef.current.play().catch(() => {});
+    }
+  }, [remoteStream]);
 
   // Handle creating a room
   const handleCreate = async () => {
@@ -99,22 +163,99 @@ export default function PrivateBattlePage() {
     }
   };
 
-  // When connected, start the battle
+  // When connected → go to camera-setup phase
   useEffect(() => {
     if (!isConnected) return;
     // Exchange usernames
     sendData({ type: 'username', name: username });
-    // Start camera + AI
+    // Move to camera setup
+    setPhase('camera-setup');
+  }, [isConnected]);
+
+  // Camera setup — start camera + AI when entering this phase
+  useEffect(() => {
+    if (phase !== 'camera-setup') return;
     const init = async () => {
       await Promise.all([startCamera(), initialize()]);
-      // Small delay then start countdown
-      setTimeout(() => {
-        setPhase('countdown');
-        setCountdown(3);
-      }, 1000);
     };
     init();
-  }, [isConnected]);
+  }, [phase]);
+
+  // Once camera is active, start the media call to share video
+  useEffect(() => {
+    if (phase !== 'camera-setup' || !isActive) return;
+    const stream = getStream();
+    if (stream) {
+      // Small delay to let PeerJS connection stabilize
+      setTimeout(() => {
+        callPeer(stream);
+      }, 500);
+    }
+  }, [phase, isActive, getStream, callPeer]);
+
+  // Detection loop — runs during camera-setup (to detect face) and during battle
+  const runDetection = useCallback(() => {
+    if (!videoRef.current || !isReady || !isActive) {
+      animFrameRef.current = requestAnimationFrame(runDetection);
+      return;
+    }
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    const wrap = videoWrapRef.current;
+    if (!canvas || !wrap) { animFrameRef.current = requestAnimationFrame(runDetection); return; }
+    const ctx = canvas.getContext('2d');
+
+    // Use container dimensions for canvas (fixes mobile offset)
+    const cw = wrap.clientWidth;
+    const ch = wrap.clientHeight;
+    canvas.width = cw;
+    canvas.height = ch;
+
+    const detectionResult = detect(video);
+    if (detectionResult) {
+      setFaceDetected(true);
+
+      // Calculate object-fit: cover transform
+      const t = getCoverTransform(video, wrap);
+
+      // Transform landmarks from video coords to canvas (container) coords
+      const vw = video.videoWidth || 640;
+      const vh = video.videoHeight || 480;
+      const transformedLandmarks = detectionResult.landmarks.map(lm => ({
+        ...lm,
+        x: (lm.x * vw - t.offsetX) * t.scaleX / cw,
+        y: (lm.y * vh - t.offsetY) * t.scaleY / ch,
+      }));
+
+      drawLandmarks(ctx, transformedLandmarks, cw, ch, {
+        color: '#00ff88', pointSize: 1.5, lineWidth: 0.5, glowEffect: true,
+      });
+
+      if (phase === 'scanning' || phase === 'overtime') {
+        processFrame(detectionResult.landmarks);
+      }
+    } else {
+      setFaceDetected(false);
+      ctx.clearRect(0, 0, cw, ch);
+    }
+    animFrameRef.current = requestAnimationFrame(runDetection);
+  }, [isReady, isActive, detect, videoRef, phase, processFrame]);
+
+  useEffect(() => {
+    if (isActive && isReady) {
+      animFrameRef.current = requestAnimationFrame(runDetection);
+    }
+    return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
+  }, [isActive, isReady, runDetection]);
+
+  // When face detected + camera active → mark self as ready and notify peer
+  useEffect(() => {
+    if (phase !== 'camera-setup' || myReady) return;
+    if (isActive && faceDetected) {
+      setMyReady(true);
+      sendData({ type: 'camera-ready' });
+    }
+  }, [phase, isActive, faceDetected, myReady, sendData]);
 
   // Handle peer data
   useEffect(() => {
@@ -123,8 +264,21 @@ export default function PrivateBattlePage() {
       setOpponentName(peerData.name);
     } else if (peerData.type === 'score') {
       setOpponentScore(peerData.score);
+    } else if (peerData.type === 'camera-ready') {
+      setOpponentReady(true);
     }
   }, [peerData]);
+
+  // When both ready → start countdown
+  useEffect(() => {
+    if (phase !== 'camera-setup') return;
+    if (myReady && opponentReady) {
+      setTimeout(() => {
+        setPhase('countdown');
+        setCountdown(READY_COUNTDOWN);
+      }, 500);
+    }
+  }, [phase, myReady, opponentReady]);
 
   // Countdown
   useEffect(() => {
@@ -177,37 +331,6 @@ export default function PrivateBattlePage() {
     }, 1000);
     return () => clearInterval(interval);
   }, [phase, playerScore, sendData]);
-
-  // Detection loop
-  const runDetection = useCallback(() => {
-    if (!videoRef.current || !isReady || !isActive) {
-      animFrameRef.current = requestAnimationFrame(runDetection);
-      return;
-    }
-    const video = videoRef.current;
-    const canvas = canvasRef.current;
-    if (!canvas) { animFrameRef.current = requestAnimationFrame(runDetection); return; }
-    const ctx = canvas.getContext('2d');
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
-    const detectionResult = detect(video);
-    if (detectionResult) {
-      drawLandmarks(ctx, detectionResult.landmarks, canvas.width, canvas.height, {
-        color: '#00ff88', pointSize: 1.5, lineWidth: 0.5, glowEffect: true,
-      });
-      if (phase === 'scanning' || phase === 'overtime') {
-        processFrame(detectionResult.landmarks);
-      }
-    }
-    animFrameRef.current = requestAnimationFrame(runDetection);
-  }, [isReady, isActive, detect, videoRef, phase, processFrame]);
-
-  useEffect(() => {
-    if (isActive && isReady) {
-      animFrameRef.current = requestAnimationFrame(runDetection);
-    }
-    return () => { if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current); };
-  }, [isActive, isReady, runDetection]);
 
   // Calculate results
   useEffect(() => {
@@ -321,6 +444,70 @@ export default function PrivateBattlePage() {
     );
   }
 
+  // ==================== CAMERA SETUP PHASE ====================
+  if (phase === 'camera-setup') {
+    return (
+      <div className="battle-page">
+        <Link to="/dashboard" className="battle-back" onClick={() => { disconnect(); stopCamera(); }}>
+          ← Leave
+        </Link>
+
+        <div className="camera-setup">
+          <div className="camera-setup__title">📸 Camera Check</div>
+          <div className="camera-setup__subtitle">
+            Both players need their camera active and face detected to start.
+          </div>
+
+          <div className="camera-setup__panels">
+            {/* Your camera */}
+            <div className={`camera-setup__panel ${myReady ? 'camera-setup__panel--ready' : ''}`}>
+              <div className="camera-setup__panel-label">YOU</div>
+              <div className="camera-setup__video-wrap" ref={videoWrapRef}>
+                <video ref={videoRef} playsInline muted />
+                <canvas ref={canvasRef} />
+                {!isActive && (
+                  <div className="camera-setup__loading">
+                    <div className="battle-state__spinner" />
+                    <span>Starting camera...</span>
+                  </div>
+                )}
+              </div>
+              <div className={`camera-setup__status ${myReady ? 'camera-setup__status--ready' : ''}`}>
+                {myReady ? '✅ Ready' : faceDetected ? '🔍 Detecting face...' : '📷 Waiting for camera...'}
+              </div>
+            </div>
+
+            <div className="camera-setup__vs">VS</div>
+
+            {/* Opponent camera */}
+            <div className={`camera-setup__panel ${opponentReady ? 'camera-setup__panel--ready' : ''}`}>
+              <div className="camera-setup__panel-label">{opponentName}</div>
+              <div className="camera-setup__video-wrap">
+                {remoteStream ? (
+                  <video ref={remoteVideoRef} playsInline muted />
+                ) : (
+                  <div className="camera-setup__loading">
+                    <div className="bot-avatar__icon" style={{ fontSize: '2.5rem' }}>👤</div>
+                    <span>Waiting for camera...</span>
+                  </div>
+                )}
+              </div>
+              <div className={`camera-setup__status ${opponentReady ? 'camera-setup__status--ready' : ''}`}>
+                {opponentReady ? '✅ Ready' : '⏳ Waiting...'}
+              </div>
+            </div>
+          </div>
+
+          {myReady && opponentReady && (
+            <div className="camera-setup__go">
+              🔥 Both ready! Starting battle...
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   // ==================== BATTLE PHASE ====================
   return (
     <div className="battle-page">
@@ -354,7 +541,7 @@ export default function PrivateBattlePage() {
         {/* YOUR PANEL */}
         <div className={`player-panel ${result === 'win' ? 'player-panel--winner' : result === 'loss' ? 'player-panel--loser' : ''}`}>
           {result === 'win' && <FireExplosion />}
-          <div className="player-panel__video-wrap">
+          <div className="player-panel__video-wrap" ref={videoWrapRef}>
             <div className="player-panel__label" style={{ color: '#00ff88' }}>YOUR SCAN</div>
             <video ref={videoRef} playsInline muted />
             <canvas ref={canvasRef} />
@@ -406,10 +593,14 @@ export default function PrivateBattlePage() {
           {result === 'loss' && <FireExplosion />}
           <div className="player-panel__video-wrap">
             <div className="player-panel__label" style={{ color: '#ff4444' }}>ENEMY SCAN</div>
-            <div className="bot-avatar">
-              <div className="bot-avatar__icon">👤</div>
-              <div className="bot-avatar__text">{opponentName}</div>
-            </div>
+            {remoteStream ? (
+              <video ref={remoteVideoRef} playsInline muted />
+            ) : (
+              <div className="bot-avatar">
+                <div className="bot-avatar__icon">👤</div>
+                <div className="bot-avatar__text">{opponentName}</div>
+              </div>
+            )}
             {(phase === 'scanning' || phase === 'overtime') && (
               <div className="scanning-overlay"><div className="scanning-overlay__line" style={{ animationDelay: '1s' }} /></div>
             )}

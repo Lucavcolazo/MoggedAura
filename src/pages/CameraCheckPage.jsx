@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useCamera } from '../hooks/useCamera';
 import { useFaceLandmarker } from '../hooks/useFaceLandmarker';
 import { drawLandmarks, drawAlignmentGuide } from '../utils/landmarks';
+import { markLivenessVerified } from '../utils/liveness';
 import '../styles/camera.css';
 
 const STEPS = [
@@ -129,6 +130,7 @@ export default function CameraCheckPage() {
   useEffect(() => {
     if (currentStep === 3) {
       const timer = setTimeout(() => {
+        markLivenessVerified();
         stopCamera();
         navigate('/dashboard');
       }, 1500);

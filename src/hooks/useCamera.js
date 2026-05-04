@@ -66,6 +66,10 @@ export function useCamera() {
     };
   }, []);
 
+  const getStream = useCallback(() => {
+    return streamRef.current;
+  }, []);
+
   return {
     videoRef,
     isActive,
@@ -73,5 +77,6 @@ export function useCamera() {
     error,
     startCamera,
     stopCamera,
+    getStream,
   };
 }

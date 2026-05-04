@@ -7,11 +7,43 @@ import { drawLandmarks } from '../utils/landmarks';
 import { getTier } from '../utils/tiers';
 import '../styles/battle.css';
 
+/**
+ * Helper: compute object-fit:cover transform for canvas alignment
+ * Ensures landmarks line up with the visible portion of the video on any screen size
+ */
+function getCoverTransform(video, container) {
+  const vw = video.videoWidth || 640;
+  const vh = video.videoHeight || 480;
+  const cw = container.clientWidth;
+  const ch = container.clientHeight;
+  if (!cw || !ch) return { scaleX: 1, scaleY: 1, offsetX: 0, offsetY: 0 };
+
+  const videoRatio = vw / vh;
+  const containerRatio = cw / ch;
+
+  let drawW, drawH, offsetX, offsetY;
+
+  if (containerRatio > videoRatio) {
+    drawW = vw;
+    drawH = vw / containerRatio;
+    offsetX = 0;
+    offsetY = (vh - drawH) / 2;
+  } else {
+    drawH = vh;
+    drawW = vh * containerRatio;
+    offsetX = (vw - drawW) / 2;
+    offsetY = 0;
+  }
+
+  return { scaleX: cw / drawW, scaleY: ch / drawH, offsetX, offsetY };
+}
+
 export default function LabPage() {
   const { videoRef, isActive, startCamera, stopCamera } = useCamera();
   const { initialize, detect, isReady, isLoading } = useFaceLandmarker();
   const { score, processFrame, startScanning, reset } = usePSLScore();
   const canvasRef = useRef(null);
+  const videoWrapRef = useRef(null);
   const animFrameRef = useRef(null);
   const [started, setStarted] = useState(false);
 
@@ -35,13 +67,31 @@ export default function LabPage() {
     }
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!canvas) { animFrameRef.current = requestAnimationFrame(runDetection); return; }
+    const wrap = videoWrapRef.current;
+    if (!canvas || !wrap) { animFrameRef.current = requestAnimationFrame(runDetection); return; }
     const ctx = canvas.getContext('2d');
-    canvas.width = video.videoWidth || 640;
-    canvas.height = video.videoHeight || 480;
+
+    // Use container dimensions for canvas — fixes mobile offset
+    const cw = wrap.clientWidth;
+    const ch = wrap.clientHeight;
+    canvas.width = cw;
+    canvas.height = ch;
+
     const result = detect(video);
     if (result) {
-      drawLandmarks(ctx, result.landmarks, canvas.width, canvas.height, {
+      // Calculate object-fit: cover transform
+      const t = getCoverTransform(video, wrap);
+      const vw = video.videoWidth || 640;
+      const vh = video.videoHeight || 480;
+
+      // Transform landmarks from video coords to canvas (container) coords
+      const transformedLandmarks = result.landmarks.map(lm => ({
+        ...lm,
+        x: (lm.x * vw - t.offsetX) * t.scaleX / cw,
+        y: (lm.y * vh - t.offsetY) * t.scaleY / ch,
+      }));
+
+      drawLandmarks(ctx, transformedLandmarks, cw, ch, {
         color: '#00ff88', pointSize: 1.5, lineWidth: 0.5, glowEffect: true,
       });
       processFrame(result.landmarks);
@@ -70,7 +120,7 @@ export default function LabPage() {
       <Link to="/dashboard" className="battle-back">← Back</Link>
       <div className="battle-content" style={{ justifyContent: 'center' }}>
         <div className="player-panel" style={{ maxHeight: '80vh', flex: 'none' }}>
-          <div className="player-panel__video-wrap" style={{ minHeight: '300px' }}>
+          <div className="player-panel__video-wrap" ref={videoWrapRef} style={{ minHeight: '300px' }}>
             <div className="player-panel__label" style={{ color: '#00d4ff' }}>🧪 THE LAB — SOLO SCAN</div>
             <video ref={videoRef} playsInline muted />
             <canvas ref={canvasRef} />

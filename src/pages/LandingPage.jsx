@@ -61,8 +61,8 @@ export default function LandingPage() {
             Get scored on symmetry, jawline, eye area, and more. 
             Then battle other players head-to-head.
           </p>
-          <Link to="/check" className="btn-cta" id="start-camera-check">
-            START CAMERA CHECK
+          <Link to="/auth" className="btn-cta" id="start-camera-check">
+            LOGIN / SIGN UP
             <span className="btn-cta__arrow">→</span>
           </Link>
         </div>
@@ -93,7 +93,7 @@ export default function LandingPage() {
 
         {/* Secondary Buttons */}
         <div className="secondary-buttons">
-          <Link to="/dashboard" className="btn-secondary" id="view-leaderboard">
+          <Link to="/auth" className="btn-secondary" id="view-leaderboard">
             🏆 VIEW LEADERBOARD
           </Link>
           <a href="#" className="btn-secondary" id="join-discord">
