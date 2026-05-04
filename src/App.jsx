@@ -1,4 +1,4 @@
-import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, useLocation } from 'react-router-dom';
 import { Navigate } from 'react-router-dom';
 import LandingPage from './pages/LandingPage';
 import AuthPage from './pages/AuthPage';
@@ -7,6 +7,7 @@ import DashboardPage from './pages/DashboardPage';
 import BattlePage from './pages/BattlePage';
 import LabPage from './pages/LabPage';
 import PrivateBattlePage from './pages/PrivateBattlePage';
+import AppNavbar from './components/AppNavbar';
 import { isLivenessVerified } from './utils/liveness';
 import { useAuthSession } from './hooks/useAuthSession';
 
@@ -20,50 +21,63 @@ function ProtectedBattleRoute({ children }) {
   return isLivenessVerified() ? children : <Navigate to="/check" replace />;
 }
 
+function AppShell({ children }) {
+  const { pathname } = useLocation();
+  const flushNav = ['/battle', '/private', '/check'].includes(pathname);
+  return (
+    <div className={flushNav ? 'app-shell app-shell--flush' : 'app-shell'}>
+      {children}
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/" element={<LandingPage />} />
-        <Route path="/auth" element={<AuthPage />} />
-        <Route path="/check" element={<CameraCheckPage />} />
-        <Route
-          path="/dashboard"
-          element={(
-            <ProtectedAuthRoute>
-              <DashboardPage />
-            </ProtectedAuthRoute>
-          )}
-        />
-        <Route
-          path="/battle"
-          element={(
-            <ProtectedAuthRoute>
-              <ProtectedBattleRoute>
-                <BattlePage />
-              </ProtectedBattleRoute>
-            </ProtectedAuthRoute>
-          )}
-        />
-        <Route
-          path="/lab"
-          element={(
-            <ProtectedAuthRoute>
-              <LabPage />
-            </ProtectedAuthRoute>
-          )}
-        />
-        <Route
-          path="/private"
-          element={(
-            <ProtectedAuthRoute>
-              <ProtectedBattleRoute>
-                <PrivateBattlePage />
-              </ProtectedBattleRoute>
-            </ProtectedAuthRoute>
-          )}
-        />
-      </Routes>
+      <AppNavbar />
+      <AppShell>
+        <Routes>
+          <Route path="/" element={<LandingPage />} />
+          <Route path="/auth" element={<AuthPage />} />
+          <Route path="/check" element={<CameraCheckPage />} />
+          <Route
+            path="/dashboard"
+            element={(
+              <ProtectedAuthRoute>
+                <DashboardPage />
+              </ProtectedAuthRoute>
+            )}
+          />
+          <Route
+            path="/battle"
+            element={(
+              <ProtectedAuthRoute>
+                <ProtectedBattleRoute>
+                  <BattlePage />
+                </ProtectedBattleRoute>
+              </ProtectedAuthRoute>
+            )}
+          />
+          <Route
+            path="/lab"
+            element={(
+              <ProtectedAuthRoute>
+                <LabPage />
+              </ProtectedAuthRoute>
+            )}
+          />
+          <Route
+            path="/private"
+            element={(
+              <ProtectedAuthRoute>
+                <ProtectedBattleRoute>
+                  <PrivateBattlePage />
+                </ProtectedBattleRoute>
+              </ProtectedAuthRoute>
+            )}
+          />
+        </Routes>
+      </AppShell>
     </BrowserRouter>
   );
 }

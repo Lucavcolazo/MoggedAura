@@ -26,6 +26,7 @@ export default function DashboardPage() {
   const [scoreboard, setScoreboard] = useState([]);
   const [usernameDraft, setUsernameDraft] = useState('');
   const [profileMsg, setProfileMsg] = useState('');
+  const [profileMsgIsError, setProfileMsgIsError] = useState(false);
 
   useEffect(() => {
     const boot = async () => {
@@ -106,8 +107,8 @@ export default function DashboardPage() {
           </div>
           <div className="user-header__right">
             <div className="user-header__stat">
-              <span className="user-header__stat-value">✨ {aura}</span>
-              <span className="user-header__stat-label">AURA</span>
+              <span className="user-header__stat-value">{aura}</span>
+              <span className="user-header__stat-label">Aura</span>
             </div>
             <div className="user-header__stat">
               <span className="user-header__stat-value" style={{ color: tier.color }}>
@@ -138,7 +139,8 @@ export default function DashboardPage() {
           <div className="mode-card__icon">👤</div>
           <div className="mode-card__title">Perfil</div>
           <div className="mode-card__desc">
-            Cambia tu username para mostrarlo en matchmaking y scoreboard.
+            En tu perfil se guardan: <strong>nombre</strong>, <strong>victorias</strong>, <strong>derrotas</strong>,{' '}
+            <strong>Aura</strong> y <strong>PSL</strong> (mejor puntuación). El nombre también se puede editar aquí.
           </div>
           <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
             <input
@@ -152,6 +154,7 @@ export default function DashboardPage() {
               className="btn-cta"
               onClick={async () => {
                 setProfileMsg('');
+                setProfileMsgIsError(false);
                 try {
                   if (!user?.id) return;
                   const updated = await updateMyUsername(user.id, usernameDraft);
@@ -159,18 +162,25 @@ export default function DashboardPage() {
                   setUsername(nextUsername);
                   setUsernameDraft(nextUsername);
                   localStorage.setItem('mogged_username', nextUsername);
-                  setProfileMsg('Username actualizado.');
+                  setProfileMsg('Nombre guardado en la base de datos.');
+                  setProfileMsgIsError(false);
+                  window.dispatchEvent(new CustomEvent('mogged-profile-updated'));
                   const top = await fetchTopScoreboard(10);
                   setScoreboard(top);
                 } catch (err) {
-                  setProfileMsg(err.message || 'No se pudo actualizar el username.');
+                  setProfileMsgIsError(true);
+                  setProfileMsg(err.message || 'No se pudo actualizar el nombre.');
                 }
               }}
             >
               Guardar
             </button>
           </div>
-          {profileMsg && <div style={{ marginTop: 8, color: '#00ff88' }}>{profileMsg}</div>}
+          {profileMsg && (
+            <div style={{ marginTop: 8, color: profileMsgIsError ? '#ff6b6b' : '#00ff88' }}>
+              {profileMsg}
+            </div>
+          )}
         </div>
 
         {/* Mode Grid */}
@@ -179,8 +189,7 @@ export default function DashboardPage() {
             <div className="mode-card__icon">⚔️</div>
             <div className="mode-card__title">1V1 Arena</div>
             <div className="mode-card__desc">
-              Match against a random opponent. Your face gets scanned in real-time, 
-              highest PSL score wins. Aura Points on the line.
+              Enfréntate a un rival al azar con escaneo en tiempo real; gana quien tenga mayor PSL y tu Aura se actualiza.
             </div>
             <div className="mode-card__arrow">→ Enter Match</div>
           </Link>
@@ -204,7 +213,7 @@ export default function DashboardPage() {
                   {scoreboard.slice(0, 5).map((row, i) => (
                     <div key={row.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13 }}>
                       <span>#{i + 1} {row.username}</span>
-                      <strong>✨ {row.aura_points}</strong>
+                      <span>Aura {row.aura_points}</span>
                     </div>
                   ))}
                 </div>

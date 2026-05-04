@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { signInWithEmail, signUpWithEmail } from '../lib/auth';
 import { ensureProfile } from '../lib/profile';
 import { saveAura, STARTING_AURA } from '../utils/aura';
-import '../styles/landing.css';
+import '../styles/auth.css';
 
 export default function AuthPage() {
   const navigate = useNavigate();
@@ -25,84 +25,127 @@ export default function AuthPage() {
       if (mode === 'signup') {
         response = await signUpWithEmail(email, password);
         if (!response.session) {
-          setInfo('Cuenta creada. Revisa tu mail para confirmar y luego inicia sesion.');
+          setInfo('Cuenta creada. Revisa tu correo para confirmar y luego inicia sesión.');
           return;
         }
       } else {
         response = await signInWithEmail(email, password);
       }
 
-      const user = response.user || response.session?.user;
-      if (user) {
-        const profile = await ensureProfile(user, mode === 'signup' ? username : undefined);
-        const aura = Number(profile?.aura_points || STARTING_AURA);
-        saveAura(aura);
-        localStorage.setItem('mogged_username', profile?.username || user.email?.split('@')[0] || 'Player');
+      const sessionUser = response.user || response.session?.user;
+      if (sessionUser) {
+        const profile = await ensureProfile(sessionUser, mode === 'signup' ? username : undefined);
+        const auraVal = Number(profile?.aura_points || STARTING_AURA);
+        saveAura(auraVal);
+        localStorage.setItem('mogged_username', profile?.username || sessionUser.email?.split('@')[0] || 'Player');
+        window.dispatchEvent(new CustomEvent('mogged-profile-updated'));
       }
 
       navigate('/dashboard', { replace: true });
     } catch (err) {
-      setError(err.message || 'No se pudo autenticar.');
+      setError(err.message || 'No se pudo completar la operación.');
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="landing">
-      <div className="landing-content">
-        <Link to="/" className="dashboard-back">← Home</Link>
-        <div className="arena-card" style={{ maxWidth: 520, margin: '0 auto' }}>
-          <div className="arena-card__icon">🔐</div>
-          <h2 className="arena-card__title">{mode === 'signup' ? 'Crear cuenta' : 'Iniciar sesion'}</h2>
-          <p className="arena-card__desc">
-            Usa email y contraseña para guardar Aura Points y aparecer en el scoreboard global.
-          </p>
-          <form onSubmit={handleSubmit} style={{ display: 'grid', gap: 10 }}>
+    <div className="auth-page">
+      <div className="auth-card">
+        <div className="auth-card__brand">
+          <span className="auth-card__brand-mark" aria-hidden>⚡</span>
+          <span className="auth-card__brand-name">MOGGED.ONLINE</span>
+        </div>
+
+        <div className="auth-card__tabs" role="tablist">
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'signin'}
+            className={`auth-card__tab ${mode === 'signin' ? 'auth-card__tab--active' : ''}`}
+            onClick={() => { setMode('signin'); setError(''); setInfo(''); }}
+          >
+            Entrar
+          </button>
+          <button
+            type="button"
+            role="tab"
+            aria-selected={mode === 'signup'}
+            className={`auth-card__tab ${mode === 'signup' ? 'auth-card__tab--active' : ''}`}
+            onClick={() => { setMode('signup'); setError(''); setInfo(''); }}
+          >
+            Registro
+          </button>
+        </div>
+
+        <h1 className="auth-card__title">
+          {mode === 'signup' ? 'Nueva cuenta' : 'Iniciar sesión'}
+        </h1>
+        <p className="auth-card__subtitle">
+          {mode === 'signup'
+            ? 'Elige un nombre público y guarda tu Aura en la nube.'
+            : 'Accede para sincronizar Aura, PSL y el scoreboard.'}
+        </p>
+
+        <form className="auth-form" onSubmit={handleSubmit}>
+          <div className="auth-field">
+            <label className="auth-label" htmlFor="auth-email">Correo</label>
             <input
+              id="auth-email"
+              className="auth-input"
               type="email"
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              placeholder="email@dominio.com"
+              placeholder="tu@email.com"
+              autoComplete="email"
               required
-              style={{ padding: 12, borderRadius: 8, border: '1px solid #2d2d2d', background: '#121212', color: '#fff' }}
             />
+          </div>
+
+          <div className="auth-field">
+            <label className="auth-label" htmlFor="auth-password">Contraseña</label>
             <input
+              id="auth-password"
+              className="auth-input"
               type="password"
               value={password}
               onChange={(e) => setPassword(e.target.value)}
-              placeholder="Minimo 6 caracteres"
+              placeholder="Mínimo 6 caracteres"
               minLength={6}
+              autoComplete={mode === 'signup' ? 'new-password' : 'current-password'}
               required
-              style={{ padding: 12, borderRadius: 8, border: '1px solid #2d2d2d', background: '#121212', color: '#fff' }}
             />
-            {mode === 'signup' && (
+          </div>
+
+          {mode === 'signup' && (
+            <div className="auth-field">
+              <label className="auth-label" htmlFor="auth-username">Nombre de usuario</label>
               <input
+                id="auth-username"
+                className="auth-input"
                 type="text"
                 value={username}
                 onChange={(e) => setUsername(e.target.value)}
-                placeholder="Tu username (a-z, 0-9, _)"
+                placeholder="solo letras, números y guión bajo"
                 minLength={3}
                 maxLength={20}
+                autoComplete="username"
                 required
-                style={{ padding: 12, borderRadius: 8, border: '1px solid #2d2d2d', background: '#121212', color: '#fff' }}
               />
-            )}
-            <button type="submit" className="btn-cta" disabled={loading}>
-              {loading ? 'Procesando...' : mode === 'signup' ? 'Crear cuenta' : 'Entrar'}
-            </button>
-          </form>
-          {error && <p style={{ color: '#ff6b6b', marginTop: 10 }}>{error}</p>}
-          {info && <p style={{ color: '#00ff88', marginTop: 10 }}>{info}</p>}
-          <button
-            type="button"
-            className="btn-secondary"
-            style={{ marginTop: 12 }}
-            onClick={() => setMode((prev) => (prev === 'signup' ? 'signin' : 'signup'))}
-          >
-            {mode === 'signup' ? 'Ya tengo cuenta' : 'No tengo cuenta'}
+            </div>
+          )}
+
+          <button type="submit" className="btn-cta auth-submit" disabled={loading}>
+            {loading ? 'Espera…' : mode === 'signup' ? 'Crear cuenta' : 'Entrar'}
           </button>
-        </div>
+        </form>
+
+        {error && <p className="auth-msg auth-msg--error">{error}</p>}
+        {info && <p className="auth-msg auth-msg--ok">{info}</p>}
+
+        <p className="auth-hint">
+          <Link to="/" style={{ color: 'var(--accent-green)' }}>← Volver al inicio</Link>
+        </p>
       </div>
     </div>
   );

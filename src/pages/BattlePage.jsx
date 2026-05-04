@@ -364,7 +364,9 @@ export default function BattlePage() {
       newAura,
       result: isWin ? 'win' : 'loss',
       playerScore: pScore,
-    }).catch(() => {});
+    })
+      .then(() => window.dispatchEvent(new CustomEvent('mogged-profile-updated')))
+      .catch(() => {});
   }, [opponentAura, opponentName, opponentScore, phase, playerAura, playerScore, user?.id]);
 
   const handleRematch = async () => {
@@ -449,7 +451,7 @@ export default function BattlePage() {
               </div>
               <div className="player-info__details">
                 <span className="player-info__name">{username}</span>
-                <span className="player-info__elo">✨ {playerAura} AP</span>
+                <span className="player-info__elo">Aura {playerAura}</span>
               </div>
             </div>
           </div>
@@ -482,7 +484,7 @@ export default function BattlePage() {
               </div>
               <div className="player-info__details">
                 <span className="player-info__name">{opponentName}</span>
-                <span className="player-info__elo">✨ {opponentAura} AP</span>
+                <span className="player-info__elo">Aura {opponentAura}</span>
               </div>
             </div>
           </div>
@@ -505,7 +507,7 @@ export default function BattlePage() {
         <div className="battle-state">
           <div className="battle-state__found">OPPONENT FOUND</div>
           <div className="battle-state__subtext">
-            {opponentName} · ✨ {opponentAura} AP · {roomCode || peerRoomCode || 'Linking P2P...'}
+            {opponentName} · Aura {opponentAura} · {roomCode || peerRoomCode || 'Linking P2P...'}
           </div>
         </div>
       )}
@@ -541,7 +543,7 @@ export default function BattlePage() {
             </div>
           </div>
           <div className={`battle-results__elo-change ${auraChange >= 0 ? 'battle-results__elo-change--positive' : 'battle-results__elo-change--negative'}`}>
-            ✨ Aura Points: {auraChange >= 0 ? '+' : ''}{auraChange}
+            Aura: {auraChange >= 0 ? '+' : ''}{auraChange}
           </div>
           <div className="battle-results__buttons">
             <button className="btn-cta" onClick={handleRematch} id="rematch-btn">⚔️ REMATCH</button>

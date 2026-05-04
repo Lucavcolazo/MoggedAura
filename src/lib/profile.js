@@ -15,15 +15,37 @@ export async function ensureProfile(user, preferredUsername) {
   const supabase = getSupabaseClient();
   if (!supabase || !user) return null;
 
-  const username = normalizeUsername(preferredUsername, user.email);
+  const { data: existing, error: readError } = await supabase
+    .from('profiles')
+    .select('*')
+    .eq('id', user.id)
+    .maybeSingle();
 
+  if (readError) throw readError;
+
+  if (existing) {
+    const patch = { email: user.email };
+    if (preferredUsername) {
+      patch.username = normalizeUsername(preferredUsername, user.email);
+    }
+    const { data, error } = await supabase
+      .from('profiles')
+      .update(patch)
+      .eq('id', user.id)
+      .select('*')
+      .single();
+    if (error) throw error;
+    return data;
+  }
+
+  const username = normalizeUsername(preferredUsername, user.email);
   const { data, error } = await supabase
     .from('profiles')
-    .upsert({
+    .insert({
       id: user.id,
       email: user.email,
       username,
-    }, { onConflict: 'id' })
+    })
     .select('*')
     .single();
 
@@ -103,6 +125,11 @@ export async function updateMyUsername(userId, username) {
     .eq('id', userId)
     .select('*')
     .single();
-  if (error) throw error;
+  if (error) {
+    if (error.code === '23505' || String(error.message || '').toLowerCase().includes('duplicate')) {
+      throw new Error('Ese nombre de usuario ya existe en la base de datos. Elige otro.');
+    }
+    throw error;
+  }
   return data;
 }

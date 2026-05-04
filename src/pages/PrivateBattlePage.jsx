@@ -8,6 +8,8 @@ import { drawLandmarks } from '../utils/landmarks';
 import { getTier } from '../utils/tiers';
 import { calculateAura, loadAura, saveAura, saveMatch, getResultMessage } from '../utils/aura';
 import { isLivenessVerified } from '../utils/liveness';
+import { useAuthSession } from '../hooks/useAuthSession';
+import { updateProfileAfterMatch } from '../lib/profile';
 import '../styles/battle.css';
 
 const SCAN_DURATION = 10; // seconds
@@ -89,6 +91,7 @@ function getCoverTransform(video, container) {
 
 export default function PrivateBattlePage() {
   const navigate = useNavigate();
+  const { user } = useAuthSession();
   const { videoRef, isActive, startCamera, stopCamera, getStream } = useCamera();
   const { initialize, detect, isReady } = useFaceLandmarker();
   const { score: playerScore, processFrame, startScanning, reset: resetScore } = usePSLScore();
@@ -359,6 +362,16 @@ export default function PrivateBattlePage() {
       timestamp: Date.now(),
       mode: 'private',
     });
+
+    updateProfileAfterMatch({
+      userId: user?.id,
+      newAura,
+      result: isWin ? 'win' : 'loss',
+      playerScore: pScore,
+    })
+      .then(() => window.dispatchEvent(new CustomEvent('mogged-profile-updated')))
+      .catch(() => {});
+    // Solo phase como dependencia: un único cierre de partida al entrar en resultados.
   }, [phase]);
 
   const pScore = playerScore?.overall || 0;
@@ -556,7 +569,7 @@ export default function PrivateBattlePage() {
               </div>
               <div className="player-info__details">
                 <span className="player-info__name">{username}</span>
-                <span className="player-info__elo">✨ {playerAura} AP</span>
+                <span className="player-info__elo">Aura {playerAura}</span>
               </div>
             </div>
             <div className="player-info__right">
@@ -612,7 +625,7 @@ export default function PrivateBattlePage() {
               </div>
               <div className="player-info__details">
                 <span className="player-info__name">{opponentName}</span>
-                <span className="player-info__elo">✨ ??? AP</span>
+                <span className="player-info__elo">Aura ???</span>
               </div>
             </div>
             <div className="player-info__right">
@@ -666,7 +679,7 @@ export default function PrivateBattlePage() {
           </div>
 
           <div className={`battle-results__elo-change ${auraChange >= 0 ? 'battle-results__elo-change--positive' : 'battle-results__elo-change--negative'}`}>
-            ✨ Aura Points: {auraChange >= 0 ? '+' : ''}{auraChange}
+            Aura: {auraChange >= 0 ? '+' : ''}{auraChange}
           </div>
 
           <div className="battle-results__buttons">
